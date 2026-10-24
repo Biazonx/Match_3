@@ -2,37 +2,71 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#041d10">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Fortune Casino</title>
 <style>
 :root{color-scheme:dark}
-html,body{margin:0;height:100%;background:#050d08;display:flex;align-items:center;justify-content:center}
-html,body{overflow:hidden;background:#041d10}
-canvas{position:fixed;left:0;top:0;width:100vw;height:100vh;display:block;touch-action:none;cursor:pointer;user-select:none}
+html,body{margin:0;height:100%;overflow:hidden;background:#041d10;overscroll-behavior:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;left:0;top:0;width:100%;height:100%;display:block;touch-action:none;cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <script>
 let TARGET=3000;
-const W=800,H=600,N=8,CELL=60,BX=30,BY=60,MOVES=25,DIFFS=[{moves:30,target:1500},{moves:30,target:2000},{moves:30,target:2500}];
+const N=8,CELL=60,MOVES=25,DIFFS=[{moves:30,target:1500},{moves:30,target:2000},{moves:30,target:2500}];
 const COLORS=[['#d7263d','#6b0716'],['#1e9e5a','#0a4526'],['#2f73d9','#0b2f6b'],['#2b2d33','#0a0a0d'],['#8a3fd6','#3d1262'],['#f4f4f1','#9a9aa3']];
 const SIDES=[0,4,4,6,3,5], ROT=[0,0,Math.PI/4,0,-Math.PI/2,-Math.PI/2];
 const CONF=['#ffd34d','#ff5c7a','#4fe39a','#5aa8ff','#ffffff'];
-const BTN_NEW={x:565,y:490,w:180,h:44}, BTN_AGAIN={x:300,y:370,w:200,h:50}, BTN_MENU={x:565,y:436,w:180,h:40}, BTN_OMENU={x:300,y:436,w:200,h:44}, BTN_CW={x:565,y:406,w:84,h:26}, BTN_CCW={x:661,y:406,w:84,h:26};
+const FS_OK=!!document.documentElement.requestFullscreen;
+
+// Logical layout. Landscape uses the original 800x600 side-panel design; portrait
+// (typical phones held upright) stacks the header above the board and puts the
+// controls below it so everything is large enough to tap.
+let W=800,H=600,PORT=null,BX=30,BY=60,bgCv=null;
+let BTN_NEW,BTN_AGAIN,BTN_MENU,BTN_OMENU,BTN_CW,BTN_CCW,BAR;
+function layout(port){
+  PORT=port;
+  if(port){
+    W=540;H=840;BX=30;BY=200;
+    BTN_NEW={x:30,y:772,w:130,h:44};
+    BTN_CW={x:172,y:772,w:98,h:44};
+    BTN_CCW={x:280,y:772,w:98,h:44};
+    BTN_MENU={x:390,y:772,w:120,h:44};
+    BTN_AGAIN={x:170,y:430,w:200,h:50};
+    BTN_OMENU={x:170,y:500,w:200,h:44};
+    BAR={x:40,y:150,w:460,h:12};
+  }else{
+    W=800;H=600;BX=30;BY=60;
+    BTN_NEW={x:565,y:490,w:180,h:44};
+    BTN_CW={x:565,y:406,w:84,h:26};
+    BTN_CCW={x:661,y:406,w:84,h:26};
+    BTN_MENU={x:565,y:436,w:180,h:40};
+    BTN_AGAIN={x:300,y:370,w:200,h:50};
+    BTN_OMENU={x:300,y:436,w:200,h:44};
+    BAR={x:562,y:326,w:186,h:16};
+  }
+  bgCv=null;
+}
 
 const cv=document.getElementById('c'),ctx=cv.getContext('2d');
 let DPR=1,S=1,OX=0,OY=0;
-// Backing store matches the browser window at device resolution; the 800x600 game
+// Backing store matches the browser window at device resolution; the logical
 // layout is scaled to fit (letterboxed) so every size and mouse mapping stays the same.
 function fit(){
-  DPR=Math.min(2,window.devicePixelRatio||1);
   const iw=window.innerWidth,ih=window.innerHeight;
+  const port=ih>iw;
+  if(port!==PORT)layout(port);
+  DPR=Math.min(2,window.devicePixelRatio||1);
   cv.width=Math.round(iw*DPR);cv.height=Math.round(ih*DPR);
   S=Math.min(iw/W,ih/H);OX=(iw-W*S)/2;OY=(ih-H*S)/2;
   ctx.setTransform(S*DPR,0,0,S*DPR,OX*DPR,OY*DPR);
 }
 window.addEventListener('resize',fit);
+window.addEventListener('orientationchange',fit);
 document.addEventListener('fullscreenchange',fit);
 fit();
 
@@ -55,6 +89,8 @@ const mk=(tp,r,c)=>({t:tp,r,c,px:tx(c),py:ty(r)});
 const inb=p=>p[0]>=0&&p[0]<N&&p[1]>=0&&p[1]<N;
 const adj=(a,b)=>Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1])===1;
 const hit=(x,y,b)=>x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h;
+const limitWarn=()=>timeLimit?timeLeft<=10:moves<=5;
+const limitText=()=>timeLimit?fmtTime(timeLeft):String(moves);
 
 function ac(){
   if(!AC){try{AC=new(window.AudioContext||window.webkitAudioContext)();}catch(e){}}
@@ -88,20 +124,22 @@ function toggleFull(){
 }
 function openMenu(){prevState=state;state='menu';sel=null;drag=null;}
 function menuItems(){
+  const cx=W/2,oy=(H-600)/2;
   const MB=(x,y,w,h,label,act,dis)=>({x,y,w,h,label,act,dis});
-  if(state==='levels')return LEVELS.map((L,i)=>MB(140,160+i*56,520,46,i<unlocked?(i+1)+'. '+L.name+'  ·  '+L.desc:(i+1)+'. Locked',()=>newGame(i),i>=unlocked)).concat([MB(300,470,200,48,'BACK',()=>{state='menu';})]);
+  const bw=Math.min(520,W-60);
+  if(state==='levels')return LEVELS.map((L,i)=>MB(cx-bw/2,160+oy+i*56,bw,46,i<unlocked?(i+1)+'. '+L.name+'  ·  '+L.desc:(i+1)+'. Locked',()=>newGame(i),i>=unlocked)).concat([MB(cx-100,470+oy,200,48,'BACK',()=>{state='menu';})]);
   if(state==='menu')return[
-    MB(300,200,200,50,'QUICK PLAY',()=>newGame(-1)),
-    MB(300,266,200,50,'CAMPAIGN',()=>{state='levels';}),
-    MB(300,332,200,50,'RESUME',()=>{state=prevState;},!prevState),
-    MB(300,398,200,50,'OPTIONS',()=>{state='options';})
+    MB(cx-100,200+oy,200,50,'QUICK PLAY',()=>newGame(-1)),
+    MB(cx-100,266+oy,200,50,'CAMPAIGN',()=>{state='levels';}),
+    MB(cx-100,332+oy,200,50,'RESUME',()=>{state=prevState;},!prevState),
+    MB(cx-100,398+oy,200,50,'OPTIONS',()=>{state='options';})
   ];
   return[
-    MB(240,190,320,48,'Music: '+(opt.music?'ON':'OFF'),()=>{opt.music=!opt.music;setMusic();}),
-    MB(240,250,320,48,'Sound Effects: '+(opt.sfx?'ON':'OFF'),()=>{opt.sfx=!opt.sfx;}),
-    MB(240,310,320,48,'Fullscreen: '+(isFull()?'ON':'OFF'),()=>toggleFull()),
-    MB(240,370,320,48,'Difficulty: '+['Easy','Normal','Hard'][opt.diff],()=>{opt.diff=(opt.diff+1)%3;}),
-    MB(300,450,200,48,'BACK',()=>{state='menu';})
+    MB(cx-160,190+oy,320,48,'Music: '+(opt.music?'ON':'OFF'),()=>{opt.music=!opt.music;setMusic();}),
+    MB(cx-160,250+oy,320,48,'Sound Effects: '+(opt.sfx?'ON':'OFF'),()=>{opt.sfx=!opt.sfx;}),
+    MB(cx-160,310+oy,320,48,'Fullscreen: '+(isFull()?'ON':'OFF'),()=>toggleFull(),!FS_OK),
+    MB(cx-160,370+oy,320,48,'Difficulty: '+['Easy','Normal','Hard'][opt.diff],()=>{opt.diff=(opt.diff+1)%3;}),
+    MB(cx-100,450+oy,200,48,'BACK',()=>{state='menu';})
   ];
 }
 function rotateBoard(){
@@ -370,12 +408,14 @@ function button(b,label,dis){
   ctx.globalAlpha=dis?.35:1;
   rr(b.x,b.y,b.w,b.h,b.h/2);
   ctx.fillStyle=goldGrad(b.y,b.y+b.h);ctx.fill();
-  ctx.fillStyle='#2a1600';ctx.font='bold 18px Georgia';ctx.textBaseline='middle';ctx.textAlign='center';
+  ctx.fillStyle='#2a1600';ctx.font='bold 18px Georgia';
+  // Shrink long labels so they always fit inside narrow phone buttons.
+  for(let fs=18;fs>11&&ctx.measureText(label).width>b.w-20;fs--)ctx.font='bold '+(fs-1)+'px Georgia';
+  ctx.textBaseline='middle';ctx.textAlign='center';
   ctx.fillText(label,b.x+b.w/2,b.y+b.h/2+1);
   ctx.textBaseline='alphabetic';
 }
 
-let bgCv=null;
 // Felt background and card suits, rendered once and reused every frame.
 function getBg(){
   if(bgCv)return bgCv;
@@ -385,25 +425,87 @@ function getBg(){
   bg.addColorStop(0,'#14803f');bg.addColorStop(1,'#041d10');
   k.fillStyle=bg;k.fillRect(0,0,W,H);
   k.fillStyle='rgba(255,255,255,.05)';k.font='170px Georgia';k.textAlign='center';k.textBaseline='middle';
-  k.fillText('♠',95,520);k.fillText('♦',730,80);
+  k.fillText('♠',W*.12,H*.87);k.fillText('♦',W*.91,H*.13);
   return bgCv;
 }
 function drawMenu(){
+  const oy=(H-600)/2;
   const bg=ctx.createRadialGradient(W/2,H/2,40,W/2,H/2,460);
   bg.addColorStop(0,'#14803f');bg.addColorStop(1,'#041d10');
   ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
   ctx.textAlign='center';ctx.textBaseline='alphabetic';ctx.globalAlpha=1;
   ctx.shadowColor='#000';ctx.shadowBlur=12;
-  ctx.fillStyle=goldGrad(80,150);
-  for(let fs=64;fs>=24;fs--){ctx.font='bold '+fs+'px Georgia';if(ctx.measureText('FORTUNE CASINO').width<=740)break;}
-  ctx.fillText('FORTUNE CASINO',W/2,150);
+  ctx.fillStyle=goldGrad(80+oy,150+oy);
+  for(let fs=64;fs>=24;fs--){ctx.font='bold '+fs+'px Georgia';if(ctx.measureText('FORTUNE CASINO').width<=W-60)break;}
+  ctx.fillText('FORTUNE CASINO',W/2,150+oy);
   ctx.shadowBlur=0;
   ctx.font='italic 18px Georgia';ctx.fillStyle='#d8c27a';
-  ctx.fillText(state==='options'?'Options':state==='levels'?'Campaign':'Match 3 - Win Big',W/2,182);
+  ctx.fillText(state==='options'?'Options':state==='levels'?'Campaign':'Match 3 - Win Big',W/2,182+oy);
   menuItems().forEach(b=>button(b,b.label,b.dis));
-  if(cheatT>0){ctx.font='bold 18px Georgia';ctx.fillStyle='#ffd34d';ctx.fillText('All levels unlocked!',W/2,540);}
+  if(cheatT>0){ctx.font='bold 18px Georgia';ctx.fillStyle='#ffd34d';ctx.fillText('All levels unlocked!',W/2,540+oy);}
   ctx.font='13px Georgia';ctx.fillStyle='#9fb39a';
-  ctx.fillText(state==='options'?'Difficulty applies to the next new game · Esc to go back':'Esc: menu · R: restart · Click or drag to play',W/2,570);
+  ctx.fillText(state==='options'?'Difficulty applies to the next new game · Esc to go back':'Tap or drag to play · R: restart · Esc: menu',W/2,570+oy);
+}
+
+// Landscape: the original side panel to the right of the board.
+function drawPanel(){
+  rr(540,40,230,520,18);ctx.fillStyle='rgba(12,4,8,.72)';ctx.fill();
+  ctx.lineWidth=3;ctx.strokeStyle=goldGrad(40,560);ctx.stroke();
+
+  // Shrink the title until it fits the side panel (about 196px of usable width).
+  ctx.fillStyle=goldGrad(60,100);
+  for(let fs=26;fs>=12;fs--){ctx.font='bold '+fs+'px Georgia';if(ctx.measureText('FORTUNE CASINO').width<=196)break;}
+  ctx.fillText('FORTUNE CASINO',655,80);
+  ctx.font='italic 13px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText(levelName(),655,102);
+
+  ctx.font='12px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText('SCORE',655,140);
+  ctx.font='bold 40px Georgia';ctx.fillStyle='#fff';ctx.fillText(score.toLocaleString(),655,182);
+  ctx.font='16px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText('TARGET '+TARGET.toLocaleString(),655,222);
+
+  ctx.font='12px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText(timeLimit?'TIME':'MOVES',655,262);
+  ctx.font='bold 36px Georgia';ctx.fillStyle=limitWarn()?'#ff6b6b':'#fff';ctx.fillText(limitText(),655,300);
+  drawBar();
+}
+
+// Portrait: a header band across the top with the same information in a row.
+function drawHeader(){
+  rr(16,16,W-32,164,18);ctx.fillStyle='rgba(12,4,8,.72)';ctx.fill();
+  ctx.lineWidth=3;ctx.strokeStyle=goldGrad(16,180);ctx.stroke();
+
+  ctx.fillStyle=goldGrad(30,70);
+  for(let fs=34;fs>=12;fs--){ctx.font='bold '+fs+'px Georgia';if(ctx.measureText('FORTUNE CASINO').width<=W-90)break;}
+  ctx.fillText('FORTUNE CASINO',W/2,52);
+  ctx.font='italic 14px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText(levelName(),W/2,74);
+
+  ctx.font='12px Georgia';ctx.fillStyle='#d8c27a';
+  ctx.fillText('SCORE',110,104);ctx.fillText(timeLimit?'TIME':'MOVES',W/2,104);ctx.fillText('TARGET',430,104);
+  ctx.font='bold 28px Georgia';
+  ctx.fillStyle='#fff';ctx.fillText(score.toLocaleString(),110,138);
+  ctx.fillStyle=limitWarn()?'#ff6b6b':'#fff';ctx.fillText(limitText(),W/2,138);
+  ctx.fillStyle='#d8c27a';ctx.fillText(TARGET.toLocaleString(),430,138);
+  drawBar();
+}
+
+// Score progress toward the target; position comes from the active layout.
+function drawBar(){
+  const{x,y,w,h}=BAR,r=h/2;
+  rr(x,y,w,h,r);ctx.fillStyle='#1a0b08';ctx.fill();
+  const ratio=Math.min(score/TARGET,1);
+  if(ratio>0){rr(x,y,Math.max(h,w*ratio),h,r);ctx.fillStyle=goldGrad(y,y+h);ctx.fill();}
+  rr(x,y,w,h,r);ctx.lineWidth=1.5;ctx.strokeStyle='#c8912c';ctx.stroke();
+}
+
+function drawChain(){
+  const x=PORT?W/2:655, yc=PORT?732:385, yh=PORT?726:378, yh2=PORT?750:398;
+  if(chain>1){
+    ctx.font='bold 28px Georgia';ctx.fillStyle='#ffd34d';
+    ctx.shadowColor='#ff9a00';ctx.shadowBlur=12;
+    ctx.fillText('CHAIN x'+chain,x,yc);ctx.shadowBlur=0;
+  }else{
+    ctx.font='italic 14px Georgia';ctx.fillStyle='#b9c9b5';
+    ctx.fillText(isRot()?'Then rotate it (Q / E)':'Swap adjacent gems',x,yh);
+    ctx.fillText(isRot()?'Click a 2x2 block to pick it':isWild()?'White chips match any color':'to match 3 or more',x,yh2);
+  }
 }
 
 function draw(){
@@ -412,7 +514,7 @@ function draw(){
   const bg=ctx.createRadialGradient(W/2,H/2,40,W/2,H/2,460);
   bg.addColorStop(0,'#14803f');bg.addColorStop(1,'#041d10');
   ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
-  
+
   ctx.drawImage(getBg(),0,0,W,H);
   ctx.textBaseline='alphabetic';
 
@@ -434,35 +536,9 @@ function draw(){
   }
 
   if(twistSel&&isRot()){const[r0,c0]=twistSel;rr(BX+c0*CELL+3,BY+r0*CELL+3,2*CELL-6,2*CELL-6,14);ctx.lineWidth=3;ctx.strokeStyle='#ffe27a';ctx.stroke();}
-  rr(540,40,230,520,18);ctx.fillStyle='rgba(12,4,8,.72)';ctx.fill();
-  ctx.lineWidth=3;ctx.strokeStyle=goldGrad(40,560);ctx.stroke();
 
-  // Shrink the title until it fits the side panel (about 196px of usable width).
-  ctx.fillStyle=goldGrad(60,100);
-  for(let fs=26;fs>=12;fs--){ctx.font='bold '+fs+'px Georgia';if(ctx.measureText('FORTUNE CASINO').width<=196)break;}
-  ctx.fillText('FORTUNE CASINO',655,80);
-  ctx.font='italic 13px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText(levelName(),655,102);
-
-  ctx.font='12px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText('SCORE',655,140);
-  ctx.font='bold 40px Georgia';ctx.fillStyle='#fff';ctx.fillText(score.toLocaleString(),655,182);
-  ctx.font='16px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText('TARGET '+TARGET.toLocaleString(),655,222);
-
-  ctx.font='12px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText(timeLimit?'TIME':'MOVES',655,262);
-  ctx.font='bold 36px Georgia';ctx.fillStyle=(timeLimit?timeLeft<=10:moves<=5)?'#ff6b6b':'#fff';ctx.fillText(timeLimit?fmtTime(timeLeft):String(moves),655,300);
-
-  rr(562,326,186,16,8);ctx.fillStyle='#1a0b08';ctx.fill();
-  const ratio=Math.min(score/TARGET,1);
-  if(ratio>0){rr(562,326,Math.max(16,186*ratio),16,8);ctx.fillStyle=goldGrad(326,342);ctx.fill();}
-  rr(562,326,186,16,8);ctx.lineWidth=1.5;ctx.strokeStyle='#c8912c';ctx.stroke();
-
-  if(chain>1){
-    ctx.font='bold 28px Georgia';ctx.fillStyle='#ffd34d';
-    ctx.shadowColor='#ff9a00';ctx.shadowBlur=12;
-    ctx.fillText('CHAIN x'+chain,655,385);ctx.shadowBlur=0;
-  }else{
-    ctx.font='italic 14px Georgia';ctx.fillStyle='#b9c9b5';
-    ctx.fillText(isRot()?'Then rotate it (Q / E)':'Swap adjacent gems',655,378);ctx.fillText(isRot()?'Click a 2x2 block to pick it':isWild()?'White chips match any color':'to match 3 or more',655,398);
-  }
+  if(PORT)drawHeader();else drawPanel();
+  drawChain();
 
   button(BTN_NEW,'NEW GAME');
   if(isRot()){button(BTN_CW,'CW',!twistSel);button(BTN_CCW,'CCW',!twistSel);}
@@ -476,15 +552,15 @@ function draw(){
   ctx.shadowBlur=0;ctx.globalAlpha=1;
 
   if(state!=='play'){
-    const won=state==='won';
+    const won=state==='won', ey=PORT?50:0;
     ctx.fillStyle='rgba(0,0,0,.66)';ctx.fillRect(0,0,W,H);
-    ctx.font='bold 60px Georgia';ctx.fillStyle=won?goldGrad(190,250):'#ff5c6c';
+    ctx.font='bold 60px Georgia';ctx.fillStyle=won?goldGrad(190+ey,250+ey):'#ff5c6c';
     ctx.shadowColor=won?'#ffd34d':'#ff2040';ctx.shadowBlur=24;
-    ctx.fillText(won?'JACKPOT!':'HOUSE WINS',W/2,250);
+    ctx.fillText(won?'JACKPOT!':'HOUSE WINS',W/2,250+ey);
     ctx.shadowBlur=0;
     ctx.font='20px Georgia';ctx.fillStyle='#f3e7c1';
-    ctx.fillText(won?'You reached the target of '+TARGET.toLocaleString()+'!':reason,W/2,295);
-    ctx.fillText('Score: '+score.toLocaleString()+(won?'   ·   Moves left: '+moves:'   ·   Target: '+TARGET.toLocaleString()),W/2,330);
+    ctx.fillText(won?'You reached the target of '+TARGET.toLocaleString()+'!':reason,W/2,295+ey);
+    ctx.fillText('Score: '+score.toLocaleString()+(won?'   ·   Moves left: '+moves:'   ·   Target: '+TARGET.toLocaleString()),W/2,330+ey);
     if(won&&curLevel>=0&&curLevel<LEVELS.length-1)button(BTN_AGAIN,'NEXT LEVEL');else button(BTN_AGAIN,'PLAY AGAIN');
     button(BTN_OMENU,'MAIN MENU');
   }
