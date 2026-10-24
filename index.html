@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Fortune Casino</title>
+<style>
+:root{color-scheme:dark}
+html,body{margin:0;height:100%;background:#050d08;display:flex;align-items:center;justify-content:center}
+html,body{overflow:hidden;background:#041d10}
+canvas{position:fixed;left:0;top:0;width:100vw;height:100vh;display:block;touch-action:none;cursor:pointer;user-select:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+let TARGET=3000;
+const W=800,H=600,N=8,CELL=60,BX=30,BY=60,MOVES=25,DIFFS=[{moves:30,target:1500},{moves:30,target:2000},{moves:30,target:2500}];
+const COLORS=[['#d7263d','#6b0716'],['#1e9e5a','#0a4526'],['#2f73d9','#0b2f6b'],['#2b2d33','#0a0a0d'],['#8a3fd6','#3d1262'],['#f4f4f1','#9a9aa3']];
+const SIDES=[0,4,4,6,3,5], ROT=[0,0,Math.PI/4,0,-Math.PI/2,-Math.PI/2];
+const CONF=['#ffd34d','#ff5c7a','#4fe39a','#5aa8ff','#ffffff'];
+const BTN_NEW={x:565,y:490,w:180,h:44}, BTN_AGAIN={x:300,y:370,w:200,h:50}, BTN_MENU={x:565,y:436,w:180,h:40}, BTN_OMENU={x:300,y:436,w:200,h:44}, BTN_CW={x:565,y:406,w:84,h:26}, BTN_CCW={x:661,y:406,w:84,h:26};
+
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+let DPR=1,S=1,OX=0,OY=0;
+// Backing store matches the browser window at device resolution; the 800x600 game
+// layout is scaled to fit (letterboxed) so every size and mouse mapping stays the same.
+function fit(){
+  DPR=Math.min(2,window.devicePixelRatio||1);
+  const iw=window.innerWidth,ih=window.innerHeight;
+  cv.width=Math.round(iw*DPR);cv.height=Math.round(ih*DPR);
+  S=Math.min(iw/W,ih/H);OX=(iw-W*S)/2;OY=(ih-H*S)/2;
+  ctx.setTransform(S*DPR,0,0,S*DPR,OX*DPR,OY*DPR);
+}
+window.addEventListener('resize',fit);
+document.addEventListener('fullscreenchange',fit);
+fit();
+
+let grid,dying,parts,pops,score,moves,chain,busy,delay,state,sel,revert,drag,t=0,last=performance.now();
+let prevState=null,opt={music:true,sfx:true,diff:0},AC=null,mTimer=null,mstep=0;
+let timeLimit=0,timeLeft=0,twistEvery=0,swapsSinceTwist=0,pendingTwist=false,curLevel=-1,unlocked=1,reason='',twistSel=null,twistRevert=null,cheatBuf='',cheatT=0;
+// Campaign: moves-limited, timed (Happy Hour, Jackpot Rush) and twisting-board levels.
+const LEVELS=[
+  {name:'Lounge',desc:'1,500 pts in 30 moves',target:1500,moves:30},
+  {name:'Twist Table',desc:'Rotate 2x2 blocks, 1,500 pts',target:1500,moves:30,rot:true},
+  {name:'Happy Hour',desc:'1,500 pts in 60 seconds',target:1500,time:60},
+  {name:'High Roller',desc:'2,000 pts in 25 moves, wild chips',target:2000,moves:25,twist:3,wild:true},
+  {name:'Jackpot Rush',desc:'2,000 pts in 60s, wild chips',target:2000,time:60,twist:5,wild:true}
+];
+const levelName=()=>curLevel>=0?LEVELS[curLevel].name:'Quick Play';
+
+const rnd=()=>Math.floor(Math.random()*COLORS.length);
+const tx=c=>BX+c*CELL+CELL/2, ty=r=>BY+r*CELL+CELL/2;
+const mk=(tp,r,c)=>({t:tp,r,c,px:tx(c),py:ty(r)});
+const inb=p=>p[0]>=0&&p[0]<N&&p[1]>=0&&p[1]<N;
+const adj=(a,b)=>Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1])===1;
+const hit=(x,y,b)=>x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h;
+
+function ac(){
+  if(!AC){try{AC=new(window.AudioContext||window.webkitAudioContext)();}catch(e){}}
+  if(AC&&AC.state==='suspended')AC.resume();
+  return AC;
+}
+function tone(f,d,type,v,isMusic){
+  if(isMusic?!opt.music:!opt.sfx)return;
+  const a=ac();if(!a)return;
+  const o=a.createOscillator(),g=a.createGain(),n=a.currentTime;
+  o.type=type;o.frequency.value=f;
+  g.gain.setValueAtTime(v,n);g.gain.exponentialRampToValueAtTime(.0001,n+d);
+  o.connect(g);g.connect(a.destination);o.start(n);o.stop(n+d);
+}
+const SCALE=[261.6,329.6,392,523.3,392,329.6,293.7,349.2];
+function musicTick(){
+  tone(SCALE[mstep%8]/2,.45,'triangle',.05,true);
+  if(mstep%4===0)tone(SCALE[0]/4,.9,'sine',.07,true);
+  mstep++;
+}
+function setMusic(){
+  clearInterval(mTimer);mTimer=null;
+  if(opt.music)mTimer=setInterval(musicTick,280);
+}
+function isFull(){return !!document.fullscreenElement;}
+function toggleFull(){
+  try{
+    const p=isFull()?document.exitFullscreen():document.documentElement.requestFullscreen();
+    if(p&&p.catch)p.catch(()=>{});
+  }catch(e){}
+}
+function openMenu(){prevState=state;state='menu';sel=null;drag=null;}
+function menuItems(){
+  const MB=(x,y,w,h,label,act,dis)=>({x,y,w,h,label,act,dis});
+  if(state==='levels')return LEVELS.map((L,i)=>MB(140,160+i*56,520,46,i<unlocked?(i+1)+'. '+L.name+'  ·  '+L.desc:(i+1)+'. Locked',()=>newGame(i),i>=unlocked)).concat([MB(300,470,200,48,'BACK',()=>{state='menu';})]);
+  if(state==='menu')return[
+    MB(300,200,200,50,'QUICK PLAY',()=>newGame(-1)),
+    MB(300,266,200,50,'CAMPAIGN',()=>{state='levels';}),
+    MB(300,332,200,50,'RESUME',()=>{state=prevState;},!prevState),
+    MB(300,398,200,50,'OPTIONS',()=>{state='options';})
+  ];
+  return[
+    MB(240,190,320,48,'Music: '+(opt.music?'ON':'OFF'),()=>{opt.music=!opt.music;setMusic();}),
+    MB(240,250,320,48,'Sound Effects: '+(opt.sfx?'ON':'OFF'),()=>{opt.sfx=!opt.sfx;}),
+    MB(240,310,320,48,'Fullscreen: '+(isFull()?'ON':'OFF'),()=>toggleFull()),
+    MB(240,370,320,48,'Difficulty: '+['Easy','Normal','Hard'][opt.diff],()=>{opt.diff=(opt.diff+1)%3;}),
+    MB(300,450,200,48,'BACK',()=>{state='menu';})
+  ];
+}
+function rotateBoard(){
+  const old=grid;grid=[...Array(N)].map(()=>Array(N).fill(null));
+  for(let r=0;r<N;r++)for(let c=0;c<N;c++){const g=old[r][c],nr=c,nc=N-1-r;grid[nr][nc]=g;g.r=nr;g.c=nc;}
+  sel=null;
+  pops.push({txt:'TWIST!',x:BX+N*CELL/2,y:BY+N*CELL/2,life:1.3,col:'#ffd34d'});
+  tone(392,.25,'triangle',.08);
+  busy=true;
+}
+const isRot=()=>curLevel>=0&&!!LEVELS[curLevel].rot;
+// Rotates the 2x2 block whose top-left corner is (r0,c0): dir 1 = clockwise, -1 = counter-clockwise.
+function rotateBlock(r0,c0,dir){
+  const old=[0,1].map(i=>[0,1].map(j=>grid[r0+i][c0+j]));
+  for(let i=0;i<2;i++)for(let j=0;j<2;j++){
+    const g=dir>0?old[1-j][i]:old[j][1-i];
+    grid[r0+i][c0+j]=g;g.r=r0+i;g.c=c0+j;
+  }
+}
+// Player twist: a rotation must create a match; otherwise it is undone and costs no move.
+function rotateTwist(dir){
+  if(busy||state!=='play'||!twistSel||!isRot())return;
+  const[r0,c0]=twistSel;
+  rotateBlock(r0,c0,dir);
+  if(findMatches().size){moves--;chain=0;tone(520,.12,'square',.05);twistRevert=null;}
+  else{twistRevert=[r0,c0,dir];tone(180,.1,'sine',.06);}
+  busy=true;
+}
+function fmtTime(s){s=Math.ceil(s);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
+function menuClick(x,y){
+  const b=menuItems().find(b=>hit(x,y,b));
+  if(b&&!b.dis){b.act();saveProgress();}
+}
+
+function swapRaw(a,b){
+  const g1=grid[a[0]][a[1]],g2=grid[b[0]][b[1]];
+  grid[a[0]][a[1]]=g2;grid[b[0]][b[1]]=g1;
+  if(g2){g2.r=a[0];g2.c=a[1];} if(g1){g1.r=b[0];g1.c=b[1];}
+}
+
+const WILD=5;
+const isWild=()=>curLevel>=0&&!!LEVELS[curLevel].wild;
+// Wild levels: white chips (WILD) count as any color, so a line may mix white chips with one color.
+function findMatchesWild(){
+  const s=new Set();
+  const scan=keys=>{
+    for(let i=0;i<keys.length;i++){
+      let base=-1,j=i;
+      for(;j<keys.length;j++){
+        const t=grid[Math.floor(keys[j]/N)][keys[j]%N].t;
+        if(t===WILD)continue;
+        if(base===-1)base=t;else if(t!==base)break;
+      }
+      if(j-i>=3)for(let k=i;k<j;k++)s.add(keys[k]);
+    }
+  };
+  for(let r=0;r<N;r++)scan([...Array(N)].map((_,c)=>r*N+c));
+  for(let c=0;c<N;c++)scan([...Array(N)].map((_,r)=>r*N+c));
+  return s;
+}
+function findMatches(){
+  if(isWild())return findMatchesWild();
+  const s=new Set(), g=(r,c)=>grid[r][c]?grid[r][c].t:-1;
+  for(let r=0;r<N;r++){let run=1;for(let c=1;c<=N;c++){
+    const same=c<N&&g(r,c)>=0&&g(r,c)===g(r,c-1);
+    if(same)run++;else{if(run>=3)for(let k=c-run;k<c;k++)s.add(r*N+k);run=1;}
+  }}
+  for(let c=0;c<N;c++){let run=1;for(let r=1;r<=N;r++){
+    const same=r<N&&g(r,c)>=0&&g(r,c)===g(r-1,c);
+    if(same)run++;else{if(run>=3)for(let k=r-run;k<r;k++)s.add(k*N+c);run=1;}
+  }}
+  return s;
+}
+
+function tryMatch(a,b){swapRaw(a,b);const ok=findMatches().size>0;swapRaw(a,b);return ok;}
+function playable(){
+  for(let r=0;r<N;r++)for(let c=0;c<N;c++){
+    if(c<N-1&&tryMatch([r,c],[r,c+1]))return true;
+    if(r<N-1&&tryMatch([r,c],[r+1,c]))return true;
+  }
+  return false;
+}
+
+function newGame(li=-1){
+  score=0;chain=0;swapsSinceTwist=0;pendingTwist=false;reason='';curLevel=li;twistSel=null;twistRevert=null;
+  if(li>=0){const L=LEVELS[li];TARGET=L.target;moves=L.moves||999;timeLimit=L.time||0;timeLeft=timeLimit;twistEvery=L.twist||0;}
+  else{const d=DIFFS[opt.diff];TARGET=d.target;moves=d.moves;timeLimit=0;twistEvery=0;}state='play';busy=false;delay=0;sel=null;revert=null;drag=null;
+  dying=[];parts=[];pops=[];
+  do{
+    grid=[...Array(N)].map(()=>Array(N).fill(null));
+    for(let r=0;r<N;r++)for(let c=0;c<N;c++){
+      let tp;
+      do{tp=rnd();}while((c>1&&grid[r][c-1].t===tp&&grid[r][c-2].t===tp)||(r>1&&grid[r-1][c].t===tp&&grid[r-2][c].t===tp));
+      grid[r][c]=mk(tp,r,c);
+    }
+  }while(!playable()||findMatches().size);
+}
+
+function gravity(){
+  for(let c=0;c<N;c++){
+    let empty=0;
+    for(let r=N-1;r>=0;r--){
+      if(!grid[r][c])empty++;
+      else if(empty){const g=grid[r][c];grid[r+empty][c]=g;grid[r][c]=null;g.r=r+empty;}
+    }
+    for(let i=0;i<empty;i++){
+      const g=mk(rnd(),i,c);g.py=BY+(i-empty)*CELL+CELL/2;grid[i][c]=g;
+    }
+  }
+}
+
+function burst(x,y,col,n=6){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2,s=120+Math.random()*220;
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-80,life:.6+Math.random()*.4,g:500,c:col,sz:2+Math.random()*3});
+  }
+}
+
+function trySwap(a,b){
+  if(busy||state!=='play')return;
+  sel=null;swapRaw(a,b);
+  if(findMatches().size){moves--;chain=0;tone(520,.12,'square',.05);if(twistEvery&&++swapsSinceTwist>=twistEvery){swapsSinceTwist=0;pendingTwist=true;}}
+  else{revert=[a,b];tone(180,.1,'sine',.06);}
+  busy=true;
+}
+
+function resolve(){
+  const m=findMatches();
+  if(!m.size){
+    if(twistRevert){const[a,b,d]=twistRevert;twistRevert=null;rotateBlock(a,b,-d);return;}
+    if(revert){const[a,b]=revert;revert=null;swapRaw(a,b);return;}
+    if(pendingTwist){pendingTwist=false;rotateBoard();return;}
+    busy=false;chain=0;checkEnd();return;
+  }
+  chain++;
+  let sx=0,sy=0;
+  m.forEach(k=>{
+    const r=(k/N)|0,c=k%N,g=grid[r][c];
+    sx+=tx(c);sy+=ty(r);
+    grid[r][c]=null;g.life=.28;dying.push(g);
+    burst(g.px,g.py,COLORS[g.t][0]);
+  });
+  const n=m.size,pts=n*10*chain;score+=pts;
+  pops.push({txt:'+'+pts+(chain>1?'  x'+chain:''),x:sx/n,y:sy/n,life:1.1,col:chain>1?'#ffd34d':'#ffffff'});
+  delay=.2;busy=true;tone(480+chain*90,.22,'triangle',.08);
+}
+
+function checkEnd(){
+  if(score>=TARGET){state='won';if(curLevel>=0)unlocked=Math.max(unlocked,Math.min(LEVELS.length,curLevel+2));saveProgress();[523,659,784,1046].forEach((f,i)=>setTimeout(()=>tone(f,.4,'triangle',.1),i*130));return;}
+  if(timeLimit&&timeLeft<=0){state='lost';reason='Time is up! Target not reached.';tone(200,.7,'sawtooth',.05);return;}
+  if(moves<=0){state='lost';reason='Out of moves. Target not reached.';tone(200,.7,'sawtooth',.05);return;}
+  if(!playable())reshuffle();
+}
+
+function reshuffle(){
+  const gems=[];grid.forEach(row=>row.forEach(g=>gems.push(g)));
+  for(let tries=0;tries<200;tries++){
+    for(let i=gems.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[gems[i],gems[j]]=[gems[j],gems[i]];}
+    gems.forEach((g,i)=>{const r=Math.floor(i/N),c=i%N;grid[r][c]=g;g.r=r;g.c=c;});
+    if(!findMatches().size&&playable())break;
+  }
+  pops.push({txt:'Reshuffled!',x:BX+N*CELL/2,y:BY+N*CELL/2,life:1.4,col:'#ffffff'});
+  busy=true;
+}
+
+function settled(){
+  for(let r=0;r<N;r++)for(let c=0;c<N;c++){
+    const g=grid[r][c];
+    if(g&&(g.px!==tx(c)||g.py!==ty(r)))return false;
+  }
+  return true;
+}
+
+function update(dt){
+  t+=dt;
+  if(cheatT>0)cheatT-=dt;
+  if(state==='play'&&timeLimit){timeLeft=Math.max(0,timeLeft-dt);if(timeLeft===0&&!busy)checkEnd();}
+  if(delay>0){delay-=dt;if(delay<=0){delay=0;gravity();}}
+  const k=1-Math.exp(-14*dt);
+  for(let r=0;r<N;r++)for(let c=0;c<N;c++){
+    const g=grid[r][c];if(!g)continue;
+    const X=tx(c),Y=ty(r);
+    g.px+=(X-g.px)*k;g.py+=(Y-g.py)*k;
+    if(Math.abs(X-g.px)<.5)g.px=X;
+    if(Math.abs(Y-g.py)<.5)g.py=Y;
+  }
+  for(let i=dying.length-1;i>=0;i--){dying[i].life-=dt;if(dying[i].life<=0)dying.splice(i,1);}
+  for(let i=parts.length-1;i>=0;i--){
+    const p=parts[i];p.vy+=p.g*dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt;
+    if(p.life<=0||p.y>H+20)parts.splice(i,1);
+  }
+  for(let i=pops.length-1;i>=0;i--){const p=pops[i];p.y-=28*dt;p.life-=dt*.8;if(p.life<=0)pops.splice(i,1);}
+  if(state==='won'&&Math.random()<.35){
+    parts.push({x:Math.random()*W,y:-10,vx:(Math.random()-.5)*40,vy:60+Math.random()*60,life:5,g:90,c:CONF[Math.floor(Math.random()*CONF.length)],sz:4});
+  }
+  if(state!=='menu'&&state!=='options'&&state!=='levels'&&busy&&!delay&&!dying.length&&settled())resolve();
+}
+
+function shapePath(n,rot,r){
+  ctx.beginPath();
+  if(n===0){ctx.arc(0,0,r,0,Math.PI*2);return;}
+  for(let i=0;i<n;i++){
+    const a=rot+i*Math.PI*2/n,x=Math.cos(a)*r,y=Math.sin(a)*r;
+    if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);
+  }
+  ctx.closePath();
+}
+
+const chipCache=[];
+// Each chip type is drawn once to an offscreen canvas and reused, which avoids
+// re-running shadows and gradients for every gem on every frame.
+function chipSprite(t){
+  if(chipCache[t])return chipCache[t];
+  const SZ=96,sc=document.createElement('canvas');sc.width=sc.height=SZ;
+  const k=sc.getContext('2d');k.translate(SZ/2,SZ/2);
+  const r=SZ*.33,[c1,c2]=COLORS[t];
+  k.shadowColor='rgba(0,0,0,.55)';k.shadowBlur=4;k.shadowOffsetY=2;
+  const body=k.createRadialGradient(-r*.3,-r*.3,r*.1,0,0,r);
+  body.addColorStop(0,c1);body.addColorStop(1,c2);
+  k.beginPath();k.arc(0,0,r,0,Math.PI*2);k.fillStyle=body;k.fill();
+  k.shadowColor='transparent';
+  k.fillStyle='rgba(255,255,255,.92)';
+  for(let i=0;i<12;i++){k.save();k.rotate(i*Math.PI/6);k.fillRect(-r*.1,-r*.98,r*.2,r*.24);k.restore();}
+  k.beginPath();k.arc(0,0,r*.7,0,Math.PI*2);k.lineWidth=Math.max(1,r*.04);k.strokeStyle='rgba(255,255,255,.85)';k.stroke();
+  const face=k.createRadialGradient(-r*.2,-r*.2,r*.05,0,0,r*.6);
+  face.addColorStop(0,'rgba(255,255,255,.35)');face.addColorStop(1,c1);
+  k.beginPath();k.arc(0,0,r*.6,0,Math.PI*2);k.fillStyle=face;k.fill();
+  k.fillStyle='rgba(255,255,255,.4)';k.beginPath();k.ellipse(-r*.22,-r*.3,r*.26,r*.12,-.6,0,Math.PI*2);k.fill();
+  return chipCache[t]=sc;
+}
+// Casino poker chip, drawn from the cached sprite. s scales the size, alpha the opacity.
+function drawGem(g,s,alpha){
+  if(alpha<=0||s<=0)return;
+  const d=CELL*1.2*s;
+  ctx.globalAlpha=alpha;ctx.drawImage(chipSprite(g.t),g.px-d/2,g.py-d/2,d,d);ctx.globalAlpha=1;
+}
+function drawGemOld(g,s,alpha){
+  // Casino poker chip: colored clay body, white edge inserts, inner ring and face.
+  const r=CELL*.4*s;if(r<.5||alpha<=0)return;
+  const[c1,c2]=COLORS[g.t];
+  ctx.save();ctx.globalAlpha=alpha;ctx.translate(g.px,g.py);
+  ctx.shadowColor='rgba(0,0,0,.55)';ctx.shadowBlur=6;ctx.shadowOffsetY=3;
+  const body=ctx.createRadialGradient(-r*.3,-r*.3,r*.1,0,0,r);
+  body.addColorStop(0,c1);body.addColorStop(1,c2);
+  ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.fillStyle=body;ctx.fill();
+  ctx.shadowColor='transparent';
+  ctx.fillStyle='rgba(255,255,255,.92)';
+  for(let i=0;i<12;i++){
+    ctx.save();ctx.rotate(i*Math.PI/6);ctx.fillRect(-r*.1,-r*.98,r*.2,r*.24);ctx.restore();
+  }
+  ctx.beginPath();ctx.arc(0,0,r*.7,0,Math.PI*2);ctx.lineWidth=Math.max(1,r*.04);ctx.strokeStyle='rgba(255,255,255,.85)';ctx.stroke();
+  const face=ctx.createRadialGradient(-r*.2,-r*.2,r*.05,0,0,r*.6);
+  face.addColorStop(0,'rgba(255,255,255,.35)');face.addColorStop(1,c1);
+  ctx.beginPath();ctx.arc(0,0,r*.6,0,Math.PI*2);ctx.fillStyle=face;ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.4)';ctx.beginPath();ctx.ellipse(-r*.22,-r*.3,r*.26,r*.12,-.6,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+}
+
+function goldGrad(y0,y1){
+  const g=ctx.createLinearGradient(0,y0,0,y1);
+  g.addColorStop(0,'#fff0a0');g.addColorStop(.5,'#c8912c');g.addColorStop(1,'#6e4a12');
+  return g;
+}
+function rr(x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r);}
+function button(b,label,dis){
+  ctx.globalAlpha=dis?.35:1;
+  rr(b.x,b.y,b.w,b.h,b.h/2);
+  ctx.fillStyle=goldGrad(b.y,b.y+b.h);ctx.fill();
+  ctx.fillStyle='#2a1600';ctx.font='bold 18px Georgia';ctx.textBaseline='middle';ctx.textAlign='center';
+  ctx.fillText(label,b.x+b.w/2,b.y+b.h/2+1);
+  ctx.textBaseline='alphabetic';
+}
+
+let bgCv=null;
+// Felt background and card suits, rendered once and reused every frame.
+function getBg(){
+  if(bgCv)return bgCv;
+  bgCv=document.createElement('canvas');bgCv.width=W*2;bgCv.height=H*2;
+  const k=bgCv.getContext('2d');k.scale(2,2);
+  const bg=k.createRadialGradient(W/2,H/2,40,W/2,H/2,460);
+  bg.addColorStop(0,'#14803f');bg.addColorStop(1,'#041d10');
+  k.fillStyle=bg;k.fillRect(0,0,W,H);
+  k.fillStyle='rgba(255,255,255,.05)';k.font='170px Georgia';k.textAlign='center';k.textBaseline='middle';
+  k.fillText('♠',95,520);k.fillText('♦',730,80);
+  return bgCv;
+}
+function drawMenu(){
+  const bg=ctx.createRadialGradient(W/2,H/2,40,W/2,H/2,460);
+  bg.addColorStop(0,'#14803f');bg.addColorStop(1,'#041d10');
+  ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';ctx.textBaseline='alphabetic';ctx.globalAlpha=1;
+  ctx.shadowColor='#000';ctx.shadowBlur=12;
+  ctx.fillStyle=goldGrad(80,150);
+  for(let fs=64;fs>=24;fs--){ctx.font='bold '+fs+'px Georgia';if(ctx.measureText('FORTUNE CASINO').width<=740)break;}
+  ctx.fillText('FORTUNE CASINO',W/2,150);
+  ctx.shadowBlur=0;
+  ctx.font='italic 18px Georgia';ctx.fillStyle='#d8c27a';
+  ctx.fillText(state==='options'?'Options':state==='levels'?'Campaign':'Match 3 - Win Big',W/2,182);
+  menuItems().forEach(b=>button(b,b.label,b.dis));
+  if(cheatT>0){ctx.font='bold 18px Georgia';ctx.fillStyle='#ffd34d';ctx.fillText('All levels unlocked!',W/2,540);}
+  ctx.font='13px Georgia';ctx.fillStyle='#9fb39a';
+  ctx.fillText(state==='options'?'Difficulty applies to the next new game · Esc to go back':'Esc: menu · R: restart · Click or drag to play',W/2,570);
+}
+
+function draw(){
+  if(state==='menu'||state==='options'||state==='levels'){drawMenu();return;}
+  ctx.textBaseline='alphabetic';ctx.textAlign='center';ctx.shadowBlur=0;ctx.globalAlpha=1;
+  const bg=ctx.createRadialGradient(W/2,H/2,40,W/2,H/2,460);
+  bg.addColorStop(0,'#14803f');bg.addColorStop(1,'#041d10');
+  ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
+  
+  ctx.drawImage(getBg(),0,0,W,H);
+  ctx.textBaseline='alphabetic';
+
+  rr(BX-14,BY-14,N*CELL+28,N*CELL+28,18);
+  ctx.fillStyle='#3b0c18';ctx.fill();
+  ctx.lineWidth=5;ctx.strokeStyle=goldGrad(BY-14,BY+N*CELL+14);ctx.stroke();
+
+  for(let r=0;r<N;r++)for(let c=0;c<N;c++){
+    ctx.beginPath();ctx.arc(tx(c),ty(r),CELL*.43,0,Math.PI*2);
+    ctx.fillStyle='rgba(0,0,0,.3)';ctx.fill();
+  }
+
+  for(let r=0;r<N;r++)for(let c=0;c<N;c++){const g=grid[r][c];if(g)drawGem(g,1,1);}
+  dying.forEach(g=>{const k=Math.max(0,g.life/.28);drawGem(g,1+(1-k)*.5,k);});
+
+  if(sel){
+    ctx.beginPath();ctx.arc(tx(sel[1]),ty(sel[0]),CELL*.46+Math.sin(t*8)*2,0,Math.PI*2);
+    ctx.strokeStyle='#ffe27a';ctx.lineWidth=3;ctx.stroke();
+  }
+
+  if(twistSel&&isRot()){const[r0,c0]=twistSel;rr(BX+c0*CELL+3,BY+r0*CELL+3,2*CELL-6,2*CELL-6,14);ctx.lineWidth=3;ctx.strokeStyle='#ffe27a';ctx.stroke();}
+  rr(540,40,230,520,18);ctx.fillStyle='rgba(12,4,8,.72)';ctx.fill();
+  ctx.lineWidth=3;ctx.strokeStyle=goldGrad(40,560);ctx.stroke();
+
+  // Shrink the title until it fits the side panel (about 196px of usable width).
+  ctx.fillStyle=goldGrad(60,100);
+  for(let fs=26;fs>=12;fs--){ctx.font='bold '+fs+'px Georgia';if(ctx.measureText('FORTUNE CASINO').width<=196)break;}
+  ctx.fillText('FORTUNE CASINO',655,80);
+  ctx.font='italic 13px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText(levelName(),655,102);
+
+  ctx.font='12px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText('SCORE',655,140);
+  ctx.font='bold 40px Georgia';ctx.fillStyle='#fff';ctx.fillText(score.toLocaleString(),655,182);
+  ctx.font='16px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText('TARGET '+TARGET.toLocaleString(),655,222);
+
+  ctx.font='12px Georgia';ctx.fillStyle='#d8c27a';ctx.fillText(timeLimit?'TIME':'MOVES',655,262);
+  ctx.font='bold 36px Georgia';ctx.fillStyle=(timeLimit?timeLeft<=10:moves<=5)?'#ff6b6b':'#fff';ctx.fillText(timeLimit?fmtTime(timeLeft):String(moves),655,300);
+
+  rr(562,326,186,16,8);ctx.fillStyle='#1a0b08';ctx.fill();
+  const ratio=Math.min(score/TARGET,1);
+  if(ratio>0){rr(562,326,Math.max(16,186*ratio),16,8);ctx.fillStyle=goldGrad(326,342);ctx.fill();}
+  rr(562,326,186,16,8);ctx.lineWidth=1.5;ctx.strokeStyle='#c8912c';ctx.stroke();
+
+  if(chain>1){
+    ctx.font='bold 28px Georgia';ctx.fillStyle='#ffd34d';
+    ctx.shadowColor='#ff9a00';ctx.shadowBlur=12;
+    ctx.fillText('CHAIN x'+chain,655,385);ctx.shadowBlur=0;
+  }else{
+    ctx.font='italic 14px Georgia';ctx.fillStyle='#b9c9b5';
+    ctx.fillText(isRot()?'Then rotate it (Q / E)':'Swap adjacent gems',655,378);ctx.fillText(isRot()?'Click a 2x2 block to pick it':isWild()?'White chips match any color':'to match 3 or more',655,398);
+  }
+
+  button(BTN_NEW,'NEW GAME');
+  if(isRot()){button(BTN_CW,'CW',!twistSel);button(BTN_CCW,'CCW',!twistSel);}
+  button(BTN_MENU,'MENU');
+
+  ctx.font='bold 20px Georgia';
+  pops.forEach(p=>{
+    ctx.globalAlpha=Math.min(1,p.life);ctx.fillStyle=p.col;
+    ctx.fillText(p.txt,p.x,p.y);
+  });
+  ctx.shadowBlur=0;ctx.globalAlpha=1;
+
+  if(state!=='play'){
+    const won=state==='won';
+    ctx.fillStyle='rgba(0,0,0,.66)';ctx.fillRect(0,0,W,H);
+    ctx.font='bold 60px Georgia';ctx.fillStyle=won?goldGrad(190,250):'#ff5c6c';
+    ctx.shadowColor=won?'#ffd34d':'#ff2040';ctx.shadowBlur=24;
+    ctx.fillText(won?'JACKPOT!':'HOUSE WINS',W/2,250);
+    ctx.shadowBlur=0;
+    ctx.font='20px Georgia';ctx.fillStyle='#f3e7c1';
+    ctx.fillText(won?'You reached the target of '+TARGET.toLocaleString()+'!':reason,W/2,295);
+    ctx.fillText('Score: '+score.toLocaleString()+(won?'   ·   Moves left: '+moves:'   ·   Target: '+TARGET.toLocaleString()),W/2,330);
+    if(won&&curLevel>=0&&curLevel<LEVELS.length-1)button(BTN_AGAIN,'NEXT LEVEL');else button(BTN_AGAIN,'PLAY AGAIN');
+    button(BTN_OMENU,'MAIN MENU');
+  }
+
+  parts.forEach(p=>{
+    ctx.globalAlpha=Math.min(1,p.life*2);ctx.fillStyle=p.c;
+    ctx.beginPath();ctx.arc(p.x,p.y,p.sz,0,Math.PI*2);ctx.fill();
+  });
+  ctx.globalAlpha=1;
+}
+
+function cellAt(x,y){
+  const c=Math.floor((x-BX)/CELL),r=Math.floor((y-BY)/CELL);
+  return(r>=0&&r<N&&c>=0&&c<N)?[r,c]:null;
+}
+function toCanvas(e){
+  return[(e.clientX-OX)/S,(e.clientY-OY)/S];
+}
+
+cv.addEventListener('pointerdown',e=>{
+  const[x,y]=toCanvas(e);
+  ac();if(opt.music&&!mTimer)setMusic();
+  if(state==='menu'||state==='options'||state==='levels'){menuClick(x,y);return;}
+  if(state!=='play'){if(hit(x,y,BTN_AGAIN)){if(state==='won'&&curLevel>=0&&curLevel<LEVELS.length-1)newGame(curLevel+1);else newGame(curLevel);}else if(hit(x,y,BTN_OMENU))openMenu();return;}
+  if(hit(x,y,BTN_NEW)){newGame();return;}
+  if(hit(x,y,BTN_MENU)){openMenu();return;}
+  if(isRot()&&hit(x,y,BTN_CW)){rotateTwist(1);return;}
+  if(isRot()&&hit(x,y,BTN_CCW)){rotateTwist(-1);return;}
+  if(busy)return;
+  const p=cellAt(x,y);if(!p)return;
+  if(isRot()){twistSel=[Math.min(p[0],N-2),Math.min(p[1],N-2)];return;}
+  drag={p,x,y};
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove',e=>{
+  if(!drag)return;
+  const[x,y]=toCanvas(e),dx=x-drag.x,dy=y-drag.y;
+  if(Math.hypot(dx,dy)>CELL*.35){
+    const p=drag.p;drag=null;
+    const q=Math.abs(dx)>Math.abs(dy)?[p[0],p[1]+Math.sign(dx)]:[p[0]+Math.sign(dy),p[1]];
+    if(inb(q))trySwap(p,q);
+  }
+});
+const endDrag=()=>{
+  if(!drag)return;
+  const p=drag.p;drag=null;
+  if(sel&&adj(sel,p))trySwap(sel,p);
+  else sel=(sel&&sel[0]===p[0]&&sel[1]===p[1])?null:p;
+};
+cv.addEventListener('pointerup',endDrag);
+cv.addEventListener('pointercancel',()=>{drag=null;});
+// Progress is kept in this browser's localStorage, so it survives reloads on GitHub Pages.
+const SAVE_KEY='gem-casino-save-v1';
+function loadSave(){
+  try{
+    const d=JSON.parse(localStorage.getItem(SAVE_KEY)||'null');
+    if(d){
+      if(Number.isInteger(d.unlocked))unlocked=Math.min(LEVELS.length,Math.max(1,d.unlocked));
+      if(d.opt)opt={...opt,...d.opt};
+    }
+  }catch(e){}
+}
+function saveProgress(){
+  try{localStorage.setItem(SAVE_KEY,JSON.stringify({unlocked,opt}));}catch(e){}
+}
+// Debug cheat: type "unlock" on any menu screen to unlock every campaign level.
+function cheatTyped(k){
+  if(!(state==='menu'||state==='options'||state==='levels')||k.length!==1)return;
+  cheatBuf=(cheatBuf+k.toLowerCase()).slice(-12);
+  if(cheatBuf.endsWith('unlock')){unlocked=LEVELS.length;cheatT=2.5;cheatBuf='';saveProgress();}
+}
+document.addEventListener('keydown',e=>{
+  cheatTyped(e.key);
+  if(e.key==='Escape'){
+    if(state==='options'||state==='levels')state='menu';
+    else if(state==='menu'){if(prevState)state=prevState;}
+    else openMenu();
+  }else if((e.key==='r'||e.key==='R')&&state!=='menu'&&state!=='options'&&state!=='levels')newGame(curLevel);
+  if(state==='play'&&isRot()){if(e.key==='e'||e.key==='E')rotateTwist(1);if(e.key==='q'||e.key==='Q')rotateTwist(-1);}
+});
+
+function loop(now){
+  const dt=Math.min(.033,(now-last)/1000);last=now;
+  update(dt);draw();
+  requestAnimationFrame(loop);
+}
+
+loadSave();newGame();state='menu';prevState=null;
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
